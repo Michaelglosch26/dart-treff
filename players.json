@@ -1,0 +1,20 @@
+{
+ "v": 1,
+ "updated": "2026-11-14",
+ "users": [
+  {
+   "name": "Michael Müller",
+   "salt": "etyxdtkuIJwAJVjAZvN0ZA==",
+   "iv": "zJzEHuBowbCmrS4i",
+   "ct": "p3RQVhA/OqYkOehXKopacnJtUrWfDMZE6V63GeR/HsSm+vnkrWeHVd2Yig8h3iUNZ1bW+5pW6y/h86f1pf1aZrjTsf5YL+NHBjMz0jmrwEs=",
+   "iter": 200000
+  },
+  {
+   "name": "Dominik Lindner",
+   "salt": "s/J9IFDxjK9KTStr8CJ0XA==",
+   "iv": "R/e6syZIjmNOI8pN",
+   "ct": "newX1YhVrqpYIlByD1QbcFR4a6s0wtdkzdg0mHL8chZNMNvhD/2bl2WtEkXHLnLGLqZWv6oRXq3jrUu0siv4w3QlATTvj8ok1QlI1xYHLlI=",
+   "iter": 200000
+  }
+ ]
+}
