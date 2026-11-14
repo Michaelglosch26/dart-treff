@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Dart-Treff – Spielerverwaltung</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700;800&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#090d18;--card:rgba(24,31,52,.8);--card2:#1c2440;--line:rgba(148,163,210,.16);--txt:#f3f1ea;--mut:#8f9abb;--red:#ef4b42;--green:#22b07d;--gold:#f5b83d;--gold2:#ffd27a}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;color:var(--txt);font:15px/1.45 Inter,system-ui,sans-serif;background:radial-gradient(900px 500px at 50% -120px,rgba(245,184,61,.13),transparent 70%),var(--bg);padding-bottom:40px}
+header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);background:rgba(9,13,24,.8)}
+header img{height:34px}
+header h1{font:800 22px 'Barlow Condensed',sans-serif;letter-spacing:1px;margin:0}
+header h1 span{color:var(--gold)}
+main{max-width:620px;margin:0 auto;padding:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:16px;margin-bottom:14px}
+.card h2{font:700 13px Inter,sans-serif;letter-spacing:1.6px;margin:0 0 12px;text-transform:uppercase;color:var(--mut)}
+button{font:600 15px Inter,sans-serif;border:1px solid transparent;border-radius:14px;padding:11px 14px;background:var(--card2);color:var(--txt);cursor:pointer}
+button.pri{background:linear-gradient(135deg,var(--gold2),var(--gold));color:#1a1405}
+button.ghost{background:rgba(255,255,255,.03);border-color:var(--line)}
+button.red{background:rgba(239,75,66,.15);border-color:rgba(239,75,66,.4);color:#ff8f88}
+button:disabled{opacity:.35}
+input{font:15px Inter,sans-serif;background:rgba(0,0,0,.25);color:var(--txt);border:1px solid var(--line);border-radius:14px;padding:11px;width:100%;outline:none}
+input:focus{border-color:var(--gold)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.row>*{flex:1}
+.muted{color:var(--mut);font-size:13px}
+.user{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--line)}
+.user:last-child{border:0}
+.user b{flex:1}
+.msg{padding:10px 12px;border-radius:14px;margin-top:10px;font-size:14px}
+.msg.ok{background:rgba(34,176,125,.12);border:1px solid rgba(34,176,125,.4)}
+.msg.err{background:rgba(239,75,66,.12);border:1px solid rgba(239,75,66,.4)}
+.hint{background:rgba(245,184,61,.08);border:1px solid rgba(245,184,61,.25);border-radius:14px;padding:10px 12px;font-size:13px;margin-top:10px}
+ol{padding-left:20px;margin:6px 0}
+textarea{width:100%;height:120px;font:12px monospace;background:rgba(0,0,0,.3);color:var(--mut);border:1px solid var(--line);border-radius:12px;padding:8px}
+</style>
+</head>
+<body>
+<header><img src="wappen.png" alt=""><h1>DART<span>·</span>TREFF <span style="color:var(--mut);font-weight:700">VERWALTUNG</span></h1></header>
+<main id="app"></main>
+<input type="file" id="fileIn" accept=".json,application/json" hidden>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const enc=new TextEncoder(), dec=new TextDecoder(), ITER=200000, MINPW=8;
+const b64=u8=>btoa(String.fromCharCode(...u8)), unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+async function kdf(pw,salt,iter,use){const base=await crypto.subtle.importKey('raw',enc.encode(pw),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:iter,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,[use]);}
+async function seal(name,secret,pw){const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
+  const k=await kdf(pw,salt,ITER,'encrypt'); const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},k,enc.encode(secret)));
+  return {name,salt:b64(salt),iv:b64(iv),ct:b64(ct),iter:ITER};}
+async function unseal(u,pw){const k=await kdf(pw,unb64(u.salt),u.iter,'decrypt'); return dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(u.iv)},k,unb64(u.ct)));}
+const newSecret=()=>[...crypto.getRandomValues(new Uint8Array(32))].map(x=>x.toString(16).padStart(2,'0')).join('');
+
+let roster=null, secret=null, dirty=false, note=null, rotating=false;
+function setNote(t,ok){note={t,ok};}
+function checkPw(pw,pw2){ if(pw.length<MINPW) return `Passwort muss mindestens ${MINPW} Zeichen haben`; if(pw!==pw2) return 'Die beiden Passwörter stimmen nicht überein'; return null; }
+const nameTaken=(n,except)=>roster.users.some((u,i)=>i!==except&&u.name.trim().toLowerCase()===n.trim().toLowerCase());
+
+async function boot(){
+  if(!window.isSecureContext||!crypto.subtle){ $('#app').innerHTML='<div class="card"><div class="msg err">Diese Seite braucht eine sichere Verbindung (https://). Öffne sie über deinen GitHub-Pages-Link.</div></div>'; return; }
+  try{const r=await fetch('players.json',{cache:'no-store'}); if(r.ok){const j=await r.json(); if(Array.isArray(j.users)) roster=j;}}catch(e){}
+  render();
+}
+function render(){
+  const el=$('#app'); let h='';
+  if(note) h+=`<div class="msg ${note.ok?'ok':'err'}" style="margin-bottom:14px">${esc(note.t)}</div>`;
+  if(!roster){
+    h+=`<div class="card"><h2>Start</h2><div class="muted">Es wurde keine Spielerliste (players.json) gefunden.</div>
+      <div class="row"><button class="pri" id="newBtn">Neue Spielerliste anlegen</button><button class="ghost" id="loadBtn">players.json öffnen</button></div></div>`;
+  } else if(!secret){
+    h+=`<div class="card"><h2>Entsperren</h2><div class="muted">Melde dich mit einem bestehenden Spieler an, um die Liste zu bearbeiten (${roster.users.length} Spieler).</div>
+      <div class="row"><select id="unName" style="font:15px Inter;background:rgba(0,0,0,.25);color:var(--txt);border:1px solid var(--line);border-radius:14px;padding:11px">${roster.users.map((u,i)=>`<option value="${i}">${esc(u.name)}</option>`).join('')}</select></div>
+      <div class="row"><input id="unPw" type="password" placeholder="Passwort"></div>
+      <div class="row"><button class="pri" id="unBtn">Entsperren</button></div>
+      <div class="hint">Alle Passwörter vergessen? Dann <a href="#" id="resetAll" style="color:var(--gold)">neue Liste anlegen</a> – alle Spieler bekommen neue Passwörter.</div></div>`;
+  } else if(rotating){
+    h+=`<div class="card"><h2>Gruppenschlüssel erneuern</h2>
+      <div class="muted">Nötig, wenn du jemanden endgültig aussperren willst. Jeder verbleibende Spieler bekommt ein neues Passwort und muss sich neu anmelden.</div>
+      ${roster.users.map((u,i)=>`<div class="row"><b style="flex:0 0 110px">${esc(u.name)}</b><input type="password" data-rp="${i}" placeholder="Neues Passwort"></div>`).join('')}
+      <div class="row"><button class="pri" id="rotGo">Neu verschlüsseln</button><button class="ghost" id="rotCancel">Abbrechen</button></div></div>`;
+  } else {
+    h+=`<div class="card"><h2>Spieler (${roster.users.length})</h2>
+      ${roster.users.length?roster.users.map((u,i)=>`<div class="user"><b>${esc(u.name)}</b><button class="ghost" data-pw="${i}" style="flex:0">Passwort ändern</button><button class="red" data-rm="${i}" style="flex:0">Entfernen</button></div>`).join(''):'<div class="muted">Noch keine Spieler.</div>'}
+      </div>
+      <div class="card"><h2>Spieler hinzufügen</h2>
+        <div class="row"><input id="adName" maxlength="20" placeholder="Name (wie er in der App erscheint)"></div>
+        <div class="row"><input id="adPw" type="password" placeholder="Passwort (mind. ${MINPW} Zeichen)"><input id="adPw2" type="password" placeholder="Passwort wiederholen"></div>
+        <div class="row"><button class="pri" id="adBtn">Hinzufügen</button></div></div>
+      <div class="card"><h2>Speichern</h2>
+        ${dirty?'<div class="msg err" style="margin-top:0">Ungespeicherte Änderungen – neue players.json herunterladen und auf GitHub hochladen.</div>':'<div class="muted">Keine ungespeicherten Änderungen.</div>'}
+        <div class="row"><button class="pri" id="dlBtn" ${roster.users.length?'':'disabled'}>players.json herunterladen</button><button class="ghost" id="cpBtn" ${roster.users.length?'':'disabled'}>Inhalt kopieren</button></div>
+        <ol class="muted" style="margin-top:12px"><li>Datei herunterladen.</li><li>Im GitHub-Repository <b>Add file → Upload files</b>, players.json hineinziehen (ersetzt die alte), <b>Commit changes</b>.</li><li>Nach 1–2 Minuten ist die neue Liste aktiv.</li></ol>
+        <textarea id="out" hidden readonly></textarea></div>
+      <div class="card"><h2>Jemanden endgültig aussperren</h2>
+        <div class="muted">„Entfernen“ meldet den Spieler beim nächsten App-Start mit Internet ab. Wer den alten Schlüssel noch kennt, könnte theoretisch weiter in die Lobby. Für einen kompletten Ausschluss den Gruppenschlüssel erneuern.</div>
+        <div class="row"><button class="ghost" id="rotBtn" ${roster.users.length?'':'disabled'}>Gruppenschlüssel erneuern…</button></div></div>`;
+  }
+  el.innerHTML=h; note=null; bind();
+}
+function json(){ return JSON.stringify({v:1,updated:new Date().toISOString().slice(0,10),users:roster.users},null,1); }
+function bind(){
+  const on=(id,f)=>{const b=$(id); if(b) b.onclick=f;};
+  on('#newBtn',()=>{roster={v:1,users:[]}; secret=newSecret(); dirty=true; setNote('Neue Liste angelegt. Füge jetzt die Spieler hinzu (dich selbst auch).',true); render();});
+  on('#resetAll',e=>{e.preventDefault(); roster={v:1,users:[]}; secret=newSecret(); dirty=true; setNote('Neue leere Liste mit neuem Schlüssel. Alle Spieler neu anlegen.',true); render();});
+  on('#loadBtn',()=>{const fi=$('#fileIn'); fi.value=''; fi.onchange=async()=>{try{const j=JSON.parse(await fi.files[0].text()); if(!Array.isArray(j.users)) throw 0; roster=j; render();}catch(e){setNote('Das ist keine gültige players.json',false);render();}}; fi.click();});
+  on('#unBtn',async()=>{const u=roster.users[+$('#unName').value]; $('#unBtn').disabled=true; $('#unBtn').textContent='Prüfe…';
+    try{secret=await unseal(u,$('#unPw').value); setNote('Entsperrt.',true);}catch(e){setNote('Passwort falsch',false);} render();});
+  if($('#unPw')) $('#unPw').onkeydown=e=>{if(e.key==='Enter')$('#unBtn').click();};
+  on('#adBtn',async()=>{const n=$('#adName').value.trim(), p=$('#adPw').value, p2=$('#adPw2').value;
+    if(!n){setNote('Bitte einen Namen eingeben',false);return render();}
+    if(nameTaken(n)){setNote('Diesen Namen gibt es schon',false);return render();}
+    const err=checkPw(p,p2); if(err){setNote(err,false);return render();}
+    $('#adBtn').disabled=true; roster.users.push(await seal(n,secret,p)); dirty=true; setNote(`${n} hinzugefügt.`,true); render();});
+  document.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{const i=+b.dataset.rm, n=roster.users[i].name;
+    if(b.dataset.sure){roster.users.splice(i,1); dirty=true; setNote(`${n} entfernt.`,true); render();} else {b.dataset.sure=1; b.textContent='Wirklich?';}});
+  document.querySelectorAll('[data-pw]').forEach(b=>b.onclick=()=>{const i=+b.dataset.pw, row=b.parentElement;
+    row.innerHTML=`<b>${esc(roster.users[i].name)}</b><input type="password" id="cp1" placeholder="Neues Passwort"><input type="password" id="cp2" placeholder="Wiederholen"><button class="pri" id="cpGo" style="flex:0">OK</button>`;
+    $('#cpGo').onclick=async()=>{const err=checkPw($('#cp1').value,$('#cp2').value); if(err){setNote(err,false);return render();}
+      roster.users[i]=await seal(roster.users[i].name,secret,$('#cp1').value); dirty=true; setNote(`Passwort für ${roster.users[i].name} geändert (muss sich neu anmelden).`,true); render();};});
+  on('#dlBtn',()=>{const blob=new Blob([json()],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='players.json'; document.body.appendChild(a); a.click(); a.remove(); dirty=false; setNote('players.json heruntergeladen – jetzt auf GitHub hochladen.',true); render();});
+  on('#cpBtn',async()=>{const t=$('#out'); t.hidden=false; t.value=json(); t.select(); try{await navigator.clipboard.writeText(t.value); setNote('Inhalt kopiert.',true);}catch(e){} });
+  on('#rotBtn',()=>{rotating=true; render();});
+  on('#rotCancel',()=>{rotating=false; render();});
+  on('#rotGo',async()=>{const ins=[...document.querySelectorAll('[data-rp]')];
+    for(const x of ins) if(x.value.length<MINPW){setNote(`Jedes Passwort braucht mindestens ${MINPW} Zeichen`,false); return render();}
+    $('#rotGo').disabled=true; $('#rotGo').textContent='Verschlüssele…';
+    const ns=newSecret(), users=[]; for(const x of ins){users.push(await seal(roster.users[+x.dataset.rp].name,ns,x.value));}
+    roster.users=users; secret=ns; rotating=false; dirty=true; setNote('Neuer Gruppenschlüssel erstellt. Jetzt players.json herunterladen und hochladen; danach neue Passwörter verteilen.',true); render();});
+}
+boot();
+</script>
+</body>
+</html>
