@@ -55,7 +55,11 @@ async function seal(name,secret,pw){const salt=crypto.getRandomValues(new Uint8A
 async function unseal(u,pw){const k=await kdf(pw,unb64(u.salt),u.iter,'decrypt'); return dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(u.iv)},k,unb64(u.ct)));}
 const newSecret=()=>[...crypto.getRandomValues(new Uint8Array(32))].map(x=>x.toString(16).padStart(2,'0')).join('');
 
-let roster=null, secret=null, dirty=false, note=null, rotating=false;
+let roster=null, secret=null, dirty=false, note=null, rotating=false, created=[];
+// Passwort-Generator: 3 Wörter + 3 Ziffern, z. B. "Tiger-Wolke-Anker-482" (ca. 1 Mrd. Möglichkeiten)
+const WORDS=('Adler Anker Apfel Baum Becher Berg Biber Blitz Boot Brief Burg Dach Delfin Dose Drache Eiche Eimer Engel Falke Feder Feuer Fisch Flamme Fluss Fuchs Gabel Garten Geist Glocke Hafen Hammer Hase Held Himmel Hirsch Honig Horn Hund Igel Insel Jacke Kaktus Kamel Kanne Kerze Kiste Koffer Komet Krone Lampe Laterne Lava Linde Loewe Luchs Mantel Mond Moewe Nebel Nest Ofen Orkan Otter Palme Panda Pfeil Pilz Pirat Planet Quelle Rabe Rakete Regen Ritter Rose Sattel Schiff Segel Sonne Stern Sturm Tanne Tiger Tonne Turm Uhu Vogel Wal Welle Wiese Wolf Wolke Zebra Zelt Ziel Zug Bulle Triple Double').split(' ');
+function genPw(){const r=crypto.getRandomValues(new Uint32Array(4)); const w=i=>WORDS[r[i]%WORDS.length]; return `${w(0)}-${w(1)}-${w(2)}-${100+r[3]%900}`;}
+function fillPw(a,b){const p=genPw(); for(const id of [a,b]){const x=$(id); x.type='text'; x.value=p;}}
 function setNote(t,ok){note={t,ok};}
 function checkPw(pw,pw2){ if(pw.length<MINPW) return `Passwort muss mindestens ${MINPW} Zeichen haben`; if(pw!==pw2) return 'Die beiden Passwörter stimmen nicht überein'; return null; }
 const nameTaken=(n,except)=>roster.users.some((u,i)=>i!==except&&u.name.trim().toLowerCase()===n.trim().toLowerCase());
@@ -81,6 +85,7 @@ function render(){
     h+=`<div class="card"><h2>Gruppenschlüssel erneuern</h2>
       <div class="muted">Nötig, wenn du jemanden endgültig aussperren willst. Jeder verbleibende Spieler bekommt ein neues Passwort und muss sich neu anmelden.</div>
       ${roster.users.map((u,i)=>`<div class="row"><b style="flex:0 0 110px">${esc(u.name)}</b><input type="password" data-rp="${i}" placeholder="Neues Passwort"></div>`).join('')}
+      <div class="row"><button class="ghost" id="rotGen">🎲 Alle Passwörter erzeugen</button></div>
       <div class="row"><button class="pri" id="rotGo">Neu verschlüsseln</button><button class="ghost" id="rotCancel">Abbrechen</button></div></div>`;
   } else {
     h+=`<div class="card"><h2>Spieler (${roster.users.length})</h2>
@@ -89,7 +94,11 @@ function render(){
       <div class="card"><h2>Spieler hinzufügen</h2>
         <div class="row"><input id="adName" maxlength="20" placeholder="Name (wie er in der App erscheint)"></div>
         <div class="row"><input id="adPw" type="password" placeholder="Passwort (mind. ${MINPW} Zeichen)"><input id="adPw2" type="password" placeholder="Passwort wiederholen"></div>
-        <div class="row"><button class="pri" id="adBtn">Hinzufügen</button></div></div>
+        <div class="row"><button class="ghost" id="genBtn">🎲 Passwort erzeugen</button><button class="pri" id="adBtn">Hinzufügen</button></div></div>
+      ${created.length?`<div class="card"><h2>Neu vergebene Passwörter</h2>
+        <div class="muted">Nur jetzt sichtbar – später lassen sie sich nicht mehr anzeigen. Notieren oder kopieren und jedem Spieler einzeln schicken.</div>
+        ${created.map(c=>`<div class="user"><b>${esc(c.name)}</b><code style="font-size:15px;color:var(--gold2)">${esc(c.pw)}</code></div>`).join('')}
+        <div class="row"><button class="ghost" id="cpPw">Liste kopieren</button></div><textarea id="pwOut" hidden readonly></textarea></div>`:''}
       <div class="card"><h2>Speichern</h2>
         ${dirty?'<div class="msg err" style="margin-top:0">Ungespeicherte Änderungen – neue players.json herunterladen und auf GitHub hochladen.</div>':'<div class="muted">Keine ungespeicherten Änderungen.</div>'}
         <div class="row"><button class="pri" id="dlBtn" ${roster.users.length?'':'disabled'}>players.json herunterladen</button><button class="ghost" id="cpBtn" ${roster.users.length?'':'disabled'}>Inhalt kopieren</button></div>
@@ -114,21 +123,25 @@ function bind(){
     if(!n){setNote('Bitte einen Namen eingeben',false);return render();}
     if(nameTaken(n)){setNote('Diesen Namen gibt es schon',false);return render();}
     const err=checkPw(p,p2); if(err){setNote(err,false);return render();}
-    $('#adBtn').disabled=true; roster.users.push(await seal(n,secret,p)); dirty=true; setNote(`${n} hinzugefügt.`,true); render();});
+    $('#adBtn').disabled=true; roster.users.push(await seal(n,secret,p)); created.push({name:n,pw:p}); dirty=true; setNote(`${n} hinzugefügt.`,true); render();});
+  on('#genBtn',()=>fillPw('#adPw','#adPw2'));
+  on('#cpPw',async()=>{const link=location.href.replace(/admin\.html.*$/,''); const t=`Dart-Treff: ${link}\n`+created.map(c=>`${c.name}: ${c.pw}`).join('\n'); const o=$('#pwOut'); o.hidden=false; o.value=t; o.select(); try{await navigator.clipboard.writeText(t); setNote('Liste kopiert.',true); render();}catch(e){}});
   document.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{const i=+b.dataset.rm, n=roster.users[i].name;
     if(b.dataset.sure){roster.users.splice(i,1); dirty=true; setNote(`${n} entfernt.`,true); render();} else {b.dataset.sure=1; b.textContent='Wirklich?';}});
   document.querySelectorAll('[data-pw]').forEach(b=>b.onclick=()=>{const i=+b.dataset.pw, row=b.parentElement;
-    row.innerHTML=`<b>${esc(roster.users[i].name)}</b><input type="password" id="cp1" placeholder="Neues Passwort"><input type="password" id="cp2" placeholder="Wiederholen"><button class="pri" id="cpGo" style="flex:0">OK</button>`;
+    row.innerHTML=`<b>${esc(roster.users[i].name)}</b><input type="password" id="cp1" placeholder="Neues Passwort"><input type="password" id="cp2" placeholder="Wiederholen"><button class="ghost" id="cpGen" style="flex:0" title="Passwort erzeugen">🎲</button><button class="pri" id="cpGo" style="flex:0">OK</button>`;
+    $('#cpGen').onclick=()=>fillPw('#cp1','#cp2');
     $('#cpGo').onclick=async()=>{const err=checkPw($('#cp1').value,$('#cp2').value); if(err){setNote(err,false);return render();}
-      roster.users[i]=await seal(roster.users[i].name,secret,$('#cp1').value); dirty=true; setNote(`Passwort für ${roster.users[i].name} geändert (muss sich neu anmelden).`,true); render();};});
+      roster.users[i]=await seal(roster.users[i].name,secret,$('#cp1').value); created=created.filter(c=>c.name!==roster.users[i].name); created.push({name:roster.users[i].name,pw:$('#cp1').value}); dirty=true; setNote(`Passwort für ${roster.users[i].name} geändert (muss sich neu anmelden).`,true); render();};});
   on('#dlBtn',()=>{const blob=new Blob([json()],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='players.json'; document.body.appendChild(a); a.click(); a.remove(); dirty=false; setNote('players.json heruntergeladen – jetzt auf GitHub hochladen.',true); render();});
   on('#cpBtn',async()=>{const t=$('#out'); t.hidden=false; t.value=json(); t.select(); try{await navigator.clipboard.writeText(t.value); setNote('Inhalt kopiert.',true);}catch(e){} });
   on('#rotBtn',()=>{rotating=true; render();});
   on('#rotCancel',()=>{rotating=false; render();});
+  on('#rotGen',()=>document.querySelectorAll('[data-rp]').forEach(x=>{x.type='text'; x.value=genPw();}));
   on('#rotGo',async()=>{const ins=[...document.querySelectorAll('[data-rp]')];
     for(const x of ins) if(x.value.length<MINPW){setNote(`Jedes Passwort braucht mindestens ${MINPW} Zeichen`,false); return render();}
     $('#rotGo').disabled=true; $('#rotGo').textContent='Verschlüssele…';
-    const ns=newSecret(), users=[]; for(const x of ins){users.push(await seal(roster.users[+x.dataset.rp].name,ns,x.value));}
+    const ns=newSecret(), users=[]; created=[]; for(const x of ins){const n=roster.users[+x.dataset.rp].name; users.push(await seal(n,ns,x.value)); created.push({name:n,pw:x.value});}
     roster.users=users; secret=ns; rotating=false; dirty=true; setNote('Neuer Gruppenschlüssel erstellt. Jetzt players.json herunterladen und hochladen; danach neue Passwörter verteilen.',true); render();});
 }
 boot();
