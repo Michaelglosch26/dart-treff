@@ -1,5 +1,5 @@
 // Dart-Treff: holt immer die neueste Version, offline aus dem Zwischenspeicher
-const CACHE='dart-treff-v4';
+const CACHE='dart-treff-v5';
 self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(CACHE).then(c=>Promise.all(['./','index.html','manifest.json','icon-192.png','icon-512.png','wappen.png','players.json'].map(u=>c.add(u).catch(()=>{}))))));});
 self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch',e=>{

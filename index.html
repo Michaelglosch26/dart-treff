@@ -406,7 +406,7 @@ function renderHome(){
     <div class="row"><button class="pri" id="newOnline">Online-Spiel eröffnen</button><button id="newLocal">Offline: alle an einer Scheibe</button></div>
   </div>
   <div class="card"><h2>Kamera</h2>
-    <div class="muted">${cal?'✅ Kamera ist eingerichtet. Wenn das Handy bewegt wurde: neu kalibrieren.':'Noch nicht eingerichtet. Handy fest vor dem Board befestigen (Stativ/Halterung) und einmal kalibrieren.'}</div>
+    <div class="muted">${cal?'✅ Kamera ist eingerichtet. Wenn das Handy bewegt wurde: neu kalibrieren.':'Noch nicht eingerichtet. Handy seitlich neben dem Board fest montieren (ca. 45°, nicht frontal) und einmal kalibrieren.'}</div>
     <div class="row" style="margin-top:10px"><button id="calBtn">${cal?'Neu kalibrieren':'Kamera einrichten'}</button></div>
   </div>`;
   if($('#logoutBtn')) $('#logoutBtn').onclick=()=>{ if(G) leaveGame(true); logout(); };
@@ -520,13 +520,13 @@ function renderGame(){
 function bindCommon(){ const sb=$('#spkBtn'); if(sb) sb.onclick=()=>{cam.speak=!cam.speak;LS.set('dt-speak',cam.speak);if(!cam.speak)try{speechSynthesis.cancel()}catch(e){};renderGame();}; const b=$('#leave'); if(b) b.onclick=()=>{ if(G&&G.phase==='play'){ if(b.dataset.sure){leaveGame();} else {b.dataset.sure=1;b.textContent='Wirklich?';setTimeout(()=>{if(b.isConnected){b.textContent='Verlassen';delete b.dataset.sure;}},2500);} } else leaveGame(); }; }
 
 /* ================= Kamera: Live-Bild ================= */
-const CAM_W=480;
-const cam={stream:null,box:null,video:null,ov:null,cv:null,timer:null,base:null,prev:null,stable:0,busy:false,
-  speak:LS.get('dt-speak',true),idx:null,maskKey:'',minA:60,last:null,stat:'',wake:null};
+const PROC_MAX=720;           // max. Breite des ausgewerteten Board-Ausschnitts
+const cam={stream:null,box:null,video:null,ov:null,cv:null,timer:null,base:null,prev:null,empty:null,stable:0,busy:false,
+  speak:LS.get('dt-speak',true),geo:null,geoKey:'',last:null,stat:'',wake:null,locked:false};
 function camBox(){
   if(cam.box) return cam.box;
   const b=document.createElement('div');
-  b.innerHTML=`<div style="position:relative;margin-top:8px"><video playsinline muted autoplay style="width:100%;border-radius:10px;display:block;background:#000"></video><canvas style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none"></canvas></div><div class="status" style="margin-top:6px"></div>`;
+  b.innerHTML=`<div style="position:relative;margin-top:8px"><video playsinline muted autoplay style="width:100%;border-radius:14px;display:block;background:#000"></video><canvas style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none"></canvas></div><div class="status" style="margin-top:6px"></div>`;
   cam.box=b; cam.video=b.querySelector('video'); cam.ov=b.querySelector('canvas'); cam.statEl=b.querySelector('.status');
   return b;
 }
@@ -535,40 +535,48 @@ async function camStart(){
   if(cam.stream) return true;
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){toast('Kamera wird von diesem Browser nicht unterstützt (HTTPS nötig)');return false;}
   try{
-    cam.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+    cam.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});
     camBox(); cam.video.srcObject=cam.stream; await cam.video.play().catch(()=>{});
     try{cam.wake=await navigator.wakeLock.request('screen');}catch(e){}
-    cam.base=null; cam.prev=null; cam.stable=0;
+    cam.base=null; cam.prev=null; cam.empty=null; cam.stable=0; cam.locked=false;
     return true;
   }catch(e){ toast('Kamera nicht verfügbar: '+(e.name==='NotAllowedError'?'Zugriff verweigert':e.name||e)); return false; }
 }
 function camStop(){
   clearInterval(cam.timer); cam.timer=null;
   if(cam.stream) cam.stream.getTracks().forEach(t=>t.stop());
-  cam.stream=null; cam.base=null; cam.prev=null; cam.empty=null;
+  cam.stream=null; cam.base=null; cam.prev=null; cam.empty=null; cam.locked=false;
   try{cam.wake&&cam.wake.release();}catch(e){} cam.wake=null;
 }
 async function mountCam(slot,noLoop){
   if(!(await camStart())) return;
   slot.appendChild(cam.box); cam.video.play().catch(()=>{});
   if(cam.statEl) cam.statEl.textContent=cam.stat;
-  if(!noLoop&&!cam.timer) cam.timer=setInterval(camTick,250);
+  if(!noLoop&&!cam.timer){ cam.timer=setInterval(camTick,250); setTimeout(lockExposure,1500); }
 }
 document.addEventListener('visibilitychange',async()=>{ if(document.visibilityState==='visible'&&cam.stream){try{cam.wake=await navigator.wakeLock.request('screen');}catch(e){}} });
-function grab(w,h){
-  const c=cam.cv||(cam.cv=document.createElement('canvas'));
-  if(c.width!==w||c.height!==h){c.width=w;c.height=h;}
-  c.getContext('2d',{willReadFrequently:true}).drawImage(cam.video,0,0,w,h); return c;
+// Belichtung, Weißabgleich und Fokus festhalten, damit sich das Bild nicht von selbst verändert
+async function lockExposure(){
+  if(!cam.stream||cam.locked) return; const tr=cam.stream.getVideoTracks()[0]; if(!tr||!tr.getCapabilities) return;
+  try{
+    const caps=tr.getCapabilities(), st=tr.getSettings?tr.getSettings():{}, adv={};
+    if((caps.exposureMode||[]).includes('manual')){adv.exposureMode='manual'; if(st.exposureTime) adv.exposureTime=st.exposureTime;}
+    if((caps.whiteBalanceMode||[]).includes('manual')){adv.whiteBalanceMode='manual'; if(st.colorTemperature) adv.colorTemperature=st.colorTemperature;}
+    if((caps.focusMode||[]).includes('manual')){adv.focusMode='manual'; if(st.focusDistance) adv.focusDistance=st.focusDistance;}
+    if(!Object.keys(adv).length) return;
+    const before=meanBrightness(); await tr.applyConstraints({advanced:[adv]}); cam.locked=true;
+    setTimeout(async()=>{ const after=meanBrightness(); // wird das Bild deutlich dunkler/heller: wieder automatisch
+      if(before&&after&&Math.abs(after-before)/before>0.25){ try{await tr.applyConstraints({advanced:[{exposureMode:'continuous',whiteBalanceMode:'continuous',focusMode:'continuous'}]});}catch(e){} }
+      cam.base=null; cam.empty=null; },1200);
+  }catch(e){}
 }
+function meanBrightness(){ if(!cam.video||!cam.video.videoWidth) return 0; const c=document.createElement('canvas'); c.width=64;c.height=36;
+  const x=c.getContext('2d'); x.drawImage(cam.video,0,0,64,36); const d=x.getImageData(0,0,64,36).data; let s=0; for(let i=0;i<d.length;i+=4) s+=d[i]+d[i+1]+d[i+2]; return s/(d.length/4*3); }
 function speak(t){ if(!cam.speak) return; try{const u=new SpeechSynthesisUtterance(t);u.lang='de-DE';u.rate=1.05;speechSynthesis.cancel();speechSynthesis.speak(u);}catch(e){} }
 function sayDart(d){ if(d.n===0) return 'daneben'; if(d.n===25) return d.m===2?'Bullseye':'Single Bull'; return (d.m===3?'Triple ':d.m===2?'Double ':'')+d.n; }
 
-/* ================= Kamera: Kalibrierung ================= */
-let calibTmp={c:null,pts:[]}, calibMem=null;
+/* ================= Geometrie ================= */
 const CAL_DST=[[0,170],[170,0],[0,-170],[-170,0]];
-const CAL_TXT=['mittig über der 20 (oben)','mittig bei der 6 (rechts)','mittig unter der 3 (unten)','mittig bei der 11 (links)'];
-function getCalib(){ return calibMem||(calibMem=LS.get('dt-calib2',null)); }
-function saveCalib(c){ calibMem=c; cam.maskKey=''; cam.base=null; if(!LS.set('dt-calib2',c)) toast('Kalibrierung gilt nur bis zum Schließen der App'); }
 function solve(A,b){ const n=b.length; const M=A.map((r,i)=>[...r,b[i]]);
   for(let i=0;i<n;i++){ let p=i; for(let k=i+1;k<n;k++) if(Math.abs(M[k][i])>Math.abs(M[p][i])) p=k; [M[i],M[p]]=[M[p],M[i]];
     for(let k=i+1;k<n;k++){const f=M[k][i]/M[i][i]; for(let j=i;j<=n;j++) M[k][j]-=f*M[i][j];} }
@@ -576,65 +584,137 @@ function solve(A,b){ const n=b.length; const M=A.map((r,i)=>[...r,b[i]]);
 function homography(src,dst){ const A=[],b=[];
   for(let i=0;i<4;i++){const [x,y]=src[i],[u,v]=dst[i]; A.push([x,y,1,0,0,0,-u*x,-u*y]);b.push(u); A.push([0,0,0,x,y,1,-v*x,-v*y]);b.push(v);}
   const h=solve(A,b); h.push(1); return h; }
-const applyH=(h,x,y)=>{const w=h[6]*x+h[7]*y+h[8]; return [(h[0]*x+h[1]*y+h[2])/w,(h[3]*x+h[4]*y+h[5])/w];};
-function drawOverlay(ctx,Hinv,color,lw){
+const applyH=(h,x,y)=>{const w=h[6]*x+h[7]*y+h[8]; return [(h[0]*x+h[1]*y+h[2])/w,(h[3]*x+h[4]*y+h[5])/w,w];};
+const mul3=(A,B)=>{const C=new Array(9).fill(0);for(let i=0;i<3;i++)for(let j=0;j<3;j++)for(let k=0;k<3;k++)C[i*3+j]+=A[i*3+k]*B[k*3+j];return C;};
+// Wo steht die Kamera? (aus der Kalibrierung, Verfahren nach Zhang). Hb: Board(mm) -> Video(px)
+function cameraFoot(Hb,cx,cy){
+  const h=[Hb[0]-cx*Hb[6],Hb[1]-cx*Hb[7],Hb[2]-cx*Hb[8], Hb[3]-cy*Hb[6],Hb[4]-cy*Hb[7],Hb[5]-cy*Hb[8], Hb[6],Hb[7],Hb[8]];
+  const h1=[h[0],h[3],h[6]],h2=[h[1],h[4],h[7]],h3=[h[2],h[5],h[8]], cands=[];
+  const a=-(h1[0]*h2[0]+h1[1]*h2[1]), b=h1[2]*h2[2]; if(Math.abs(b)>1e-12){const f2=a/b; if(f2>0) cands.push(f2);}
+  const c=(h1[0]**2+h1[1]**2)-(h2[0]**2+h2[1]**2), d=h2[2]**2-h1[2]**2; if(Math.abs(d)>1e-12){const f2=c/d; if(f2>0) cands.push(f2);}
+  let f=cands.length?Math.sqrt(cands.reduce((s,v)=>s+v,0)/cands.length):0;
+  if(!(f>0.3*2*cx&&f<4*2*cx)) f=0;
+  if(!f){ const Hi=homography(CAL_DST.map(p=>applyH(Hb,p[0],p[1])),CAL_DST); const p=applyH(Hi,cx,cy); return {x:p[0],y:p[1],z:600,f:0}; }
+  const inv=v=>[v[0]/f,v[1]/f,v[2]];
+  let r1=inv(h1),r2=inv(h2),t=inv(h3); const lam=(Math.hypot(...r1)+Math.hypot(...r2))/2;
+  r1=r1.map(v=>v/lam); r2=r2.map(v=>v/lam); t=t.map(v=>v/lam); if(t[2]<0){r1=r1.map(v=>-v);r2=r2.map(v=>-v);t=t.map(v=>-v);}
+  const r3=[r1[1]*r2[2]-r1[2]*r2[1],r1[2]*r2[0]-r1[0]*r2[2],r1[0]*r2[1]-r1[1]*r2[0]], dot=(u,v)=>u[0]*v[0]+u[1]*v[1]+u[2]*v[2];
+  return {x:-dot(r1,t),y:-dot(r2,t),z:Math.abs(dot(r3,t)),f};
+}
+// Einschätzung der Kameraposition für Hinweise beim Kalibrieren
+function placementInfo(foot,Hb){
+  const side=Math.hypot(foot.x,foot.y), ang=Math.atan2(side,foot.z)*180/Math.PI;
+  const a=applyH(Hb,-170,0),b=applyH(Hb,170,0),c=applyH(Hb,0,170),d=applyH(Hb,0,-170);
+  const size=Math.max(Math.hypot(a[0]-b[0],a[1]-b[1]),Math.hypot(c[0]-d[0],c[1]-d[1]));
+  const msgs=[]; let ok=true;
+  if(foot.f&&ang<25){ok=false;msgs.push('Kamera steht zu frontal – Pfeile verdecken ihre Spitze. Bitte seitlich aufstellen (ca. 45°).');}
+  else if(foot.f&&ang>70){ok=false;msgs.push('Kamera steht zu flach – etwas weiter nach vorn (weg von der Wand).');}
+  if(size<500){ok=false;msgs.push('Board ist im Bild zu klein – Handy näher ans Board (ca. 40–50 cm).');}
+  return {ok,ang:foot.f?Math.round(ang):null,size:Math.round(size),msgs};
+}
+
+/* ================= Kamera: Kalibrierung ================= */
+let calibTmp={c:null,pts:[],rough:null}, calibMem=null;
+const CAL_TXT=['mittig über der 20 (oben)','mittig bei der 6 (rechts)','mittig unter der 3 (unten)','mittig bei der 11 (links)'];
+function getCalib(){ return calibMem||(calibMem=LS.get('dt-calib3',null)); }
+function saveCalib(c){ calibMem=c; cam.geoKey=''; cam.base=null; cam.empty=null; if(!LS.set('dt-calib3',c)) toast('Kalibrierung gilt nur bis zum Schließen der App'); }
+function drawOverlay(ctx,Hb,color,lw){
   ctx.strokeStyle=color;ctx.lineWidth=lw||1.5;
-  for(const r of [R.bi,R.bo,R.ti,R.to,R.di,R.dO]){ctx.beginPath(); for(let i=0;i<=72;i++){const a=i*5*Math.PI/180;const [x,y]=applyH(Hinv,r*Math.sin(a),r*Math.cos(a)); i?ctx.lineTo(x,y):ctx.moveTo(x,y);} ctx.stroke();}
-  for(let i=0;i<20;i++){const a=(i*18-9)*Math.PI/180; const [x1,y1]=applyH(Hinv,R.bo*Math.sin(a),R.bo*Math.cos(a)),[x2,y2]=applyH(Hinv,R.dO*Math.sin(a),R.dO*Math.cos(a)); ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();}
+  for(const r of [R.bi,R.bo,R.ti,R.to,R.di,R.dO]){ctx.beginPath(); for(let i=0;i<=72;i++){const a=i*5*Math.PI/180;const [x,y]=applyH(Hb,r*Math.sin(a),r*Math.cos(a)); i?ctx.lineTo(x,y):ctx.moveTo(x,y);} ctx.stroke();}
+  for(let i=0;i<20;i++){const a=(i*18-9)*Math.PI/180; const [x1,y1]=applyH(Hb,R.bo*Math.sin(a),R.bo*Math.cos(a)),[x2,y2]=applyH(Hb,R.dO*Math.sin(a),R.dO*Math.cos(a)); ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();}
 }
 function renderCalib(){
   const el=$('#vCalib'); const t=calibTmp;
   if(!t.c){
     el.innerHTML=`<div class="card"><h2>Kamera einrichten</h2>
       <ol class="muted" style="padding-left:18px;margin:0 0 10px">
-        <li>Handy fest vor oder leicht seitlich unter dem Board befestigen (Stativ/Halterung), ganzes Board im Bild.</li>
-        <li>Alle Pfeile ziehen, gleichmäßiges Licht (am besten Board-Beleuchtung).</li>
-        <li>„Standbild aufnehmen“ tippen und 4 Punkte antippen.</li></ol>
+        <li><b>Seitlich</b> aufstellen: links oder rechts neben dem Board, ca. 40–50 cm vor der Wand, etwa auf Höhe der Boardmitte, schräg aufs Board gerichtet (ca. 45°). <b>Nicht frontal</b> – sonst verdeckt der Pfeil seine Spitze.</li>
+        <li>Handy fest montieren (Stativ/Halterung), Board möglichst groß im Bild, Ladekabel anstecken.</li>
+        <li>Alle Pfeile ziehen, gleichmäßiges Licht ohne harte Schatten (ideal: LED-Ring ums Board).</li>
+        <li>„Standbild aufnehmen“ tippen, dann 4 Punkte antippen – jeweils grob und dann in der Vergrößerung genau.</li></ol>
       <div class="hint">Danach darf sich das Handy nicht mehr bewegen. Wenn doch: neu kalibrieren.</div>
       <div id="calSlot"></div>
       <div class="row" style="margin-top:10px"><button class="pri" id="cShot">Standbild aufnehmen</button><button class="ghost" id="cBack" style="flex:0">Zurück</button></div></div>`;
     mountCam($('#calSlot'),true).then(()=>setCamStat(''));
     $('#cShot').onclick=()=>{
       if(!cam.video||!cam.video.videoWidth){toast('Kamera noch nicht bereit');return;}
-      const w=CAM_W,h=Math.round(CAM_W*cam.video.videoHeight/cam.video.videoWidth);
+      const w=cam.video.videoWidth,h=cam.video.videoHeight;
       const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(cam.video,0,0,w,h);
-      t.c=c;t.pts=[];renderCalib();
+      t.c=c;t.pts=[];t.rough=null;renderCalib();
     };
     $('#cBack').onclick=()=>{camStop();view=G?'game':'home';render();};
     return;
   }
-  const done=t.pts.length>=4;
+  const done=t.pts.length>=4, W=t.c.width, H=t.c.height;
+  let info=null, Hb=null;
+  if(done){ Hb=homography(CAL_DST,t.pts); info=placementInfo(cameraFoot(Hb,W/2,H/2),Hb); }
+  const title=done?'Passt das gelbe Gitter genau auf dein Board?':t.rough?`Jetzt genau tippen: äußerer Rand des Doppelrings ${CAL_TXT[t.pts.length]}`:`Tippe grob auf den äußeren Rand des Doppelrings ${CAL_TXT[t.pts.length]}`;
   el.innerHTML=`<div class="card"><h2>Kalibrieren (${Math.min(4,t.pts.length+1)}/4)</h2>
-    <div class="status" style="font-size:17px">${done?'Passt das gelbe Gitter auf dein Board?':'Tippe auf den äußeren Rand des Doppelrings '+CAL_TXT[t.pts.length]}</div>
+    <div class="status" style="font-size:17px">${esc(title)}</div>
     <canvas class="photo" id="cCan"></canvas>
-    <div class="row" style="margin-top:10px">${done?'<button class="pri" id="cSave">✓ Passt, speichern</button>':''}<button id="cRedo">Punkte neu</button><button class="ghost" id="cNew">Neues Standbild</button></div></div>`;
-  const can=$('#cCan'); can.width=t.c.width; can.height=t.c.height; const ctx=can.getContext('2d'); ctx.drawImage(t.c,0,0);
-  t.pts.forEach((p,i)=>{ctx.fillStyle='#f2c14e';ctx.beginPath();ctx.arc(p[0],p[1],6,0,7);ctx.fill();ctx.fillStyle='#000';ctx.font='bold 9px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(['20','6','3','11'][i],p[0],p[1]);});
-  if(done) drawOverlay(ctx,homography(CAL_DST,t.pts),'#f2c14e');
-  can.onclick=e=>{ if(done) return; const r=can.getBoundingClientRect(); t.pts.push([(e.clientX-r.left)*can.width/r.width,(e.clientY-r.top)*can.height/r.height]); renderCalib(); };
-  $('#cRedo').onclick=()=>{t.pts=[];renderCalib();};
+    ${done?`<div class="${info.ok?'hint':'hint'}" style="${info.ok?'':'border-color:rgba(239,75,66,.5);background:rgba(239,75,66,.1)'}">${info.ok?`✅ Kameraposition gut${info.ang!=null?` (ca. ${info.ang}° seitlich)`:''}.`:info.msgs.map(esc).join('<br>')}</div>`:''}
+    <div class="row" style="margin-top:10px">${done?'<button class="pri" id="cSave">✓ Passt, speichern</button>':''}${t.rough?'<button class="ghost" id="cBackZoom">Zurück zur Übersicht</button>':''}<button id="cRedo">Punkte neu</button><button class="ghost" id="cNew">Neues Standbild</button></div></div>`;
+  const can=$('#cCan'), ctx=can.getContext('2d');
+  // Vergrößerung: Ausschnitt um den groben Punkt
+  const Z=Math.round(Math.min(W,H)/5);
+  let zx=0,zy=0;
+  if(t.rough){ zx=Math.max(0,Math.min(W-Z,t.rough[0]-Z/2)); zy=Math.max(0,Math.min(H-Z,t.rough[1]-Z/2));
+    can.width=720; can.height=720; ctx.imageSmoothingEnabled=false; ctx.drawImage(t.c,zx,zy,Z,Z,0,0,720,720);
+    ctx.strokeStyle='rgba(242,193,78,.6)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(360,0);ctx.lineTo(360,720);ctx.moveTo(0,360);ctx.lineTo(720,360);ctx.stroke();
+  } else {
+    can.width=W; can.height=H; ctx.drawImage(t.c,0,0);
+    const s=Math.max(4,W/180);
+    t.pts.forEach((p,i)=>{ctx.fillStyle='#f2c14e';ctx.beginPath();ctx.arc(p[0],p[1],s,0,7);ctx.fill();ctx.fillStyle='#000';ctx.font=`bold ${Math.round(s*1.3)}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(['20','6','3','11'][i],p[0],p[1]);});
+    if(done) drawOverlay(ctx,Hb,'#f2c14e',Math.max(1.5,W/600));
+  }
+  can.onclick=e=>{ if(done) return; const r=can.getBoundingClientRect(); const px=(e.clientX-r.left)*can.width/r.width, py=(e.clientY-r.top)*can.height/r.height;
+    if(!t.rough){ t.rough=[px,py]; }
+    else { t.pts.push([zx+px*Z/720, zy+py*Z/720]); t.rough=null; }
+    renderCalib(); };
+  if($('#cBackZoom')) $('#cBackZoom').onclick=()=>{t.rough=null;renderCalib();};
+  $('#cRedo').onclick=()=>{t.pts=[];t.rough=null;renderCalib();};
   $('#cNew').onclick=()=>{t.c=null;renderCalib();};
-  if($('#cSave')) $('#cSave').onclick=()=>{ saveCalib({pts:t.pts,H:homography(t.pts,CAL_DST),Hinv:homography(CAL_DST,t.pts),w:t.c.width,h:t.c.height});
+  if($('#cSave')) $('#cSave').onclick=()=>{
+    const foot=cameraFoot(Hb,W/2,H/2);
+    saveCalib({v:3,pts:t.pts,vw:W,vh:H,Hv:homography(t.pts,CAL_DST),Hb,foot});
     toast('Kamera eingerichtet ✅'); camStop(); view=G?'game':'home'; if(G) inTab='cam'; render(); };
 }
 
 /* ================= Kamera: Pfeil-Erkennung ================= */
-function channels(c){ const d=c.getContext('2d',{willReadFrequently:true}).getImageData(0,0,c.width,c.height).data, n=c.width*c.height;
-  const r=new Float32Array(n),g=new Float32Array(n),b=new Float32Array(n); for(let i=0;i<n;i++){r[i]=d[i*4];g[i]=d[i*4+1];b[i]=d[i*4+2];} return [r,g,b]; }
+// Nur der Board-Ausschnitt wird ausgewertet (feinere Auflösung bei gleicher Rechenzeit)
+function ensureGeo(cal){
+  const vw=cam.video.videoWidth, vh=cam.video.videoHeight, key=vw+'x'+vh+':'+cal.pts.join(',');
+  if(cam.geoKey===key) return cam.geo;
+  const k=vw/cal.vw; // falls die Kamera jetzt eine andere Auflösung liefert (gleiches Format)
+  const Hb=mul3([k,0,0,0,k,0,0,0,1],cal.Hb), Hv=mul3(cal.Hv,[1/k,0,0,0,1/k,0,0,0,1]);
+  const pts=[];for(let a=0;a<360;a+=10)pts.push(applyH(Hb,215*Math.sin(a*Math.PI/180),215*Math.cos(a*Math.PI/180)));
+  const x0=Math.max(0,Math.floor(Math.min(...pts.map(p=>p[0])))),x1=Math.min(vw,Math.ceil(Math.max(...pts.map(p=>p[0])))),
+        y0=Math.max(0,Math.floor(Math.min(...pts.map(p=>p[1])))),y1=Math.min(vh,Math.ceil(Math.max(...pts.map(p=>p[1]))));
+  const pw=Math.max(80,Math.min(PROC_MAX,x1-x0)), s=(x1-x0)/pw, ph=Math.max(60,Math.round((y1-y0)/s));
+  const Hp=mul3(Hv,[s,0,x0,0,s,y0,0,0,1]), Hpi=mul3([1/s,0,-x0/s,0,1/s,-y0/s,0,0,1],Hb);
+  const idx=[]; for(let y=0;y<ph;y++)for(let x=0;x<pw;x++){const q=applyH(Hp,x+0.5,y+0.5); if(q[2]>0&&Math.hypot(q[0],q[1])<200) idx.push(y*pw+x);}
+  const a=applyH(Hpi,0,170),b=applyH(Hpi,0,-170),c=applyH(Hpi,170,0),d=applyH(Hpi,-170,0);
+  const pxmm=(Math.hypot(a[0]-b[0],a[1]-b[1])+Math.hypot(c[0]-d[0],c[1]-d[1]))/680;
+  const foot=cal.foot||cameraFoot(Hb,vw/2,vh/2);
+  cam.geo={x0,y0,x1,y1,pw,ph,s,Hp,Hpi,Hb,idx:Int32Array.from(idx),pxmm,foot,minA:Math.max(20,idx.length*0.0003)};
+  cam.geoKey=key; cam.base=null; cam.prev=null; cam.empty=null;
+  return cam.geo;
+}
+function grabROI(g){
+  const c=cam.cv||(cam.cv=document.createElement('canvas'));
+  if(c.width!==g.pw||c.height!==g.ph){c.width=g.pw;c.height=g.ph;}
+  const x=c.getContext('2d',{willReadFrequently:true}); x.imageSmoothingQuality='high';
+  x.drawImage(cam.video,g.x0,g.y0,g.x1-g.x0,g.y1-g.y0,0,0,g.pw,g.ph);
+  const d=x.getImageData(0,0,g.pw,g.ph).data, n=g.pw*g.ph, r=new Float32Array(n),gr=new Float32Array(n),b=new Float32Array(n);
+  for(let i=0;i<n;i++){r[i]=d[i*4];gr[i]=d[i*4+1];b[i]=d[i*4+2];}
+  return [r,gr,b].map(ch=>blur(ch,g.pw,g.ph,1));
+}
 function blur(src,w,h,rad){ const tmp=new Float32Array(w*h),out=new Float32Array(w*h),k=2*rad+1;
   for(let y=0;y<h;y++){const o=y*w; let acc=0; for(let x=-rad;x<=rad;x++) acc+=src[o+Math.min(w-1,Math.max(0,x))];
     for(let x=0;x<w;x++){tmp[o+x]=acc/k; acc+=src[o+Math.min(w-1,x+rad+1)]-src[o+Math.max(0,x-rad)];}}
   for(let x=0;x<w;x++){let acc=0; for(let y=-rad;y<=rad;y++) acc+=tmp[Math.min(h-1,Math.max(0,y))*w+x];
     for(let y=0;y<h;y++){out[y*w+x]=acc/k; acc+=tmp[Math.min(h-1,y+rad+1)*w+x]-tmp[Math.max(0,y-rad)*w+x];}}
   return out; }
-function ensureMask(cal){
-  const key=cal.w+'x'+cal.h+':'+cal.pts.join(',');
-  if(cam.maskKey===key) return;
-  const list=[];
-  for(let y=0;y<cal.h;y++) for(let x=0;x<cal.w;x++){const [bx,by]=applyH(cal.H,x,y); if(Math.hypot(bx,by)<200) list.push(y*cal.w+x);}
-  cam.idx=Int32Array.from(list); cam.maskKey=key; cam.minA=Math.max(40,list.length*0.0005); cam.base=null;
-  const p=cal.pts; cam.pxmm=(Math.hypot(p[0][0]-p[2][0],p[0][1]-p[2][1])+Math.hypot(p[1][0]-p[3][0],p[1][1]-p[3][1]))/680;
-}
 function components(bin,w,h,minA){
   const n=w*h, dil=new Uint8Array(n);
   for(let y=1;y<h-1;y++) for(let x=1;x<w-1;x++){const i=y*w+x; if(bin[i]||bin[i-1]||bin[i+1]||bin[i-w]||bin[i+w]) dil[i]=1;}
@@ -645,7 +725,37 @@ function components(bin,w,h,minA){
     if(px.length>=minA) comps.push(px); }
   return comps.sort((a,b)=>b.length-a.length);
 }
-function tipOf(px,w){
+// Spitze geometrisch bestimmen: Pfeil-Pixel aufs Board projizieren. Alles, was über dem Board
+// schwebt, wird dabei von der Kamera weg verschoben – nur die Spitze liegt wirklich auf dem Board.
+function tipGeo(px,g){
+  const w=g.pw, P=[];
+  for(const i of px){const q=applyH(g.Hp,i%w+0.5,((i/w)|0)+0.5); if(q[2]<=0||Math.hypot(q[0],q[1])>600) continue; P.push(q);}
+  if(P.length<8) return null;
+  let mx=0,my=0; for(const p of P){mx+=p[0];my+=p[1];} mx/=P.length; my/=P.length;
+  let sxx=0,syy=0,sxy=0; for(const p of P){const dx=p[0]-mx,dy=p[1]-my;sxx+=dx*dx;syy+=dy*dy;sxy+=dx*dy;}
+  const ang=0.5*Math.atan2(2*sxy,sxx-syy); let ux=Math.cos(ang),uy=Math.sin(ang);
+  const ax=mx-g.foot.x, ay=my-g.foot.y;
+  const l1=(sxx+syy)/2+Math.sqrt(((sxx-syy)/2)**2+sxy*sxy), l2=(sxx+syy)/2-Math.sqrt(((sxx-syy)/2)**2+sxy*sxy);
+  if(Math.sqrt(l1/Math.max(1e-6,l2))<1.8){const n=Math.hypot(ax,ay)||1; ux=ax/n; uy=ay/n;}
+  if(ux*ax+uy*ay<0){ux=-ux;uy=-uy;}
+  const ts=P.map(p=>(p[0]-mx)*ux+(p[1]-my)*uy).sort((a,b)=>a-b);
+  const tmin=ts[Math.min(ts.length-1,Math.floor(ts.length*0.01))];
+  let sx=0,sy=0,c=0; for(const p of P){const t=(p[0]-mx)*ux+(p[1]-my)*uy; if(t<=tmin+2.5){sx+=p[0];sy+=p[1];c++;}}
+  return {x:sx/c,y:sy/c,ux,uy};
+}
+// Die dünne Spitze verschwindet oft im Bild: entlang des Pfeils Richtung Kamera weiterverfolgen
+function refineTip(t,g,diff){
+  let lastX=t.x,lastY=t.y,miss=0;
+  for(let k=1;k<=60;k++){
+    const bx=t.x-t.ux*0.5*k, by=t.y-t.uy*0.5*k; let best=0;
+    for(const o of [-0.6,0,0.6]){ const q=applyH(g.Hpi,bx-t.uy*o,by+t.ux*o); const xi=Math.round(q[0]-0.5), yi=Math.round(q[1]-0.5);
+      if(xi<0||yi<0||xi>=g.pw||yi>=g.ph) continue; const v=diff[yi*g.pw+xi]; if(v>best) best=v; }
+    if(best>18){lastX=bx;lastY=by;miss=0;} else if(++miss>=3) break;
+  }
+  return [lastX+t.ux*2,lastY+t.uy*2];
+}
+// Rückfall ohne Kamerageometrie: dünnes Ende im Bild
+function tipThin(px,w){
   let mx=0,my=0; for(const i of px){mx+=i%w;my+=(i/w)|0;} mx/=px.length;my/=px.length;
   let sxx=0,syy=0,sxy=0; for(const i of px){const dx=i%w-mx,dy=((i/w)|0)-my;sxx+=dx*dx;syy+=dy*dy;sxy+=dx*dy;}
   const ang=0.5*Math.atan2(2*sxy,sxx-syy), vx=Math.cos(ang), vy=Math.sin(ang);
@@ -660,68 +770,71 @@ function myTurnState(){
   const p=G.players[G.cur]; if(!(G.local||p.cid===myCid)) return null;
   return {p,ev:evalVisit(G,p.cid,G.visit)};
 }
-function drawCamOverlay(cal){
-  const o=cam.ov; if(!o) return; if(o.width!==cal.w||o.height!==cal.h){o.width=cal.w;o.height=cal.h;}
-  const ctx=o.getContext('2d'); ctx.clearRect(0,0,o.width,o.height);
-  drawOverlay(ctx,cal.Hinv||homography(CAL_DST,cal.pts),'rgba(242,193,78,.35)',1);
-  if(cam.last&&Date.now()-cam.last.t<5000){const {tx,ty,l}=cam.last;
-    ctx.strokeStyle='#3ddc84';ctx.lineWidth=3;ctx.beginPath();ctx.arc(tx,ty,9,0,7);ctx.stroke();
-    ctx.fillStyle='#000b';ctx.fillRect(tx+11,ty-11,50,22);ctx.fillStyle='#fff';ctx.font='bold 15px sans-serif';ctx.textBaseline='middle';ctx.fillText(l,tx+15,ty);}
+function drawCamOverlay(g){
+  const o=cam.ov, vw=cam.video.videoWidth, vh=cam.video.videoHeight; if(!o) return;
+  if(o.width!==vw||o.height!==vh){o.width=vw;o.height=vh;}
+  const ctx=o.getContext('2d'); ctx.clearRect(0,0,vw,vh);
+  drawOverlay(ctx,g.Hb,'rgba(242,193,78,.35)',Math.max(1,vw/900));
+  if(cam.last&&Date.now()-cam.last.t<5000){const [vx,vy]=applyH(g.Hb,cam.last.bx,cam.last.by), r=Math.max(8,vw/110);
+    ctx.strokeStyle='#3ddc84';ctx.lineWidth=Math.max(2,vw/400);ctx.beginPath();ctx.arc(vx,vy,r,0,7);ctx.stroke();
+    ctx.font=`bold ${Math.round(r*1.6)}px sans-serif`; const tw=ctx.measureText(cam.last.l).width;
+    ctx.fillStyle='#000b';ctx.fillRect(vx+r*1.3,vy-r,tw+r,r*2);ctx.fillStyle='#fff';ctx.textBaseline='middle';ctx.fillText(cam.last.l,vx+r*1.8,vy);}
 }
 function camTick(){
   const cal=getCalib();
   if(!cam.stream||cam.busy||!cal||!cam.video||!cam.video.videoWidth) return;
-  if(Math.abs(cam.video.videoWidth/cam.video.videoHeight-cal.w/cal.h)>0.04){setCamStat('Bildformat geändert – Handy gedreht? Neu kalibrieren');return;}
+  if(Math.abs(cam.video.videoWidth/cam.video.videoHeight-cal.vw/cal.vh)>0.02){setCamStat('Bildformat geändert – Handy gedreht? Neu kalibrieren');return;}
   cam.busy=true;
   try{
-    ensureMask(cal);
-    const w=cal.w,h=cal.h, F=channels(grab(w,h)).map(ch=>blur(ch,w,h,1)), idx=cam.idx;
-    drawCamOverlay(cal);
+    const g=ensureGeo(cal), F=grabROI(g), idx=g.idx;
+    drawCamOverlay(g);
     let moving=false;
     if(cam.prev){ let cnt=0,tot=0; for(let k=0;k<idx.length;k+=2){const i=idx[k]; tot++;
         if(Math.abs(F[0][i]-cam.prev[0][i])+Math.abs(F[1][i]-cam.prev[1][i])+Math.abs(F[2][i]-cam.prev[2][i])>45) cnt++;}
-      moving=cnt/tot>0.0012; }
+      moving=cnt/tot>0.0008; }
     cam.prev=F;
     if(moving){cam.stable=0; setCamStat('Bewegung…'); return;}
     cam.stable++;
     if(!cam.base){ if(cam.stable>=3){cam.base=F; cam.empty=F; setCamStat(myTurnState()?'Bereit – wirf!':'Bereit');} return; }
-    if(cam.stable>=3&&cam.stable%4===3) analyze(F,cal);
+    if(cam.stable>=3&&cam.stable%4===3) analyze(F,g);
   }catch(e){console.error(e);}
   finally{cam.busy=false;}
 }
-function diffMask(F,B,w,h){
-  const idx=cam.idx; const off=[0,0,0]; let m3=0;
+function diffMask(F,B,g){
+  const idx=g.idx, off=[0,0,0]; let m3=0;
   for(let k=0;k<idx.length;k+=3){const i=idx[k]; m3++; for(let c=0;c<3;c++) off[c]+=F[c][i]-B[c][i];}
   for(let c=0;c<3;c++) off[c]/=m3||1;
-  const bin=new Uint8Array(w*h); let changed=0;
-  for(let k=0;k<idx.length;k++){const i=idx[k]; let m=0; for(let c=0;c<3;c++){const d=Math.abs(F[c][i]-off[c]-B[c][i]); if(d>m)m=d;} if(m>35){bin[i]=1;changed++;}}
-  return {bin,changed};
+  const n=g.pw*g.ph, bin=new Uint8Array(n), diff=new Float32Array(n); let changed=0;
+  for(let k=0;k<idx.length;k++){const i=idx[k]; let m=0; for(let c=0;c<3;c++){const d=Math.abs(F[c][i]-off[c]-B[c][i]); if(d>m)m=d;} diff[i]=m; if(m>30){bin[i]=1;changed++;}}
+  return {bin,diff,changed};
 }
-function analyze(F,cal){
-  const w=cal.w,h=cal.h,idx=cam.idx;
+function analyze(F,g){
   // Pfeile gezogen? Board sieht wieder aus wie vor der Aufnahme
   if(G&&G.visit.length&&cam.empty&&myTurnState()){
-    if(diffMask(F,cam.empty,w,h).changed<cam.minA){cam.base=F; act({type:'commit'}); setCamStat('Pfeile gezogen – Aufnahme übernommen ✓'); return;}
+    if(diffMask(F,cam.empty,g).changed<g.minA){cam.base=F; act({type:'commit'}); setCamStat('Pfeile gezogen – Aufnahme übernommen ✓'); return;}
   }
   if(!G||!G.visit.length) cam.empty=cam.base;
-  const {bin,changed}=diffMask(F,cam.base,w,h);
+  const {bin,diff,changed}=diffMask(F,cam.base,g);
   const st=myTurnState();
-  if(changed<cam.minA){ if(changed<cam.minA/2) cam.base=F; setCamStat(st?(st.ev.closed?'Pfeile ziehen…':'Bereit – wirf!'):'Bereit'); return; }
-  if(changed>idx.length*0.05){ // große Änderung: Pfeile gezogen / Person vor dem Board
+  if(changed<g.minA){ if(changed<g.minA/2) cam.base=F; setCamStat(st?(st.ev.closed?'Pfeile ziehen…':'Bereit – wirf!'):'Bereit'); return; }
+  if(changed>g.idx.length*0.05){ // große Änderung: Pfeile gezogen / Person vor dem Board
     cam.base=F;
     if(st&&G.visit.length){ act({type:'commit'}); setCamStat('Aufnahme übernommen ✓'); }
     else setCamStat('Board neu erfasst');
     return;
   }
-  const comps=components(bin,w,h,12);
-  if(!comps.length||comps[0].length<cam.minA/3){cam.base=F;return;}
-  // Teile eines Pfeils (z. B. Schaft ohne Kontrast) wieder zusammenfügen
-  const cen=px=>{let x=0,y=0;for(const i of px){x+=i%w;y+=(i/w)|0;}return [x/px.length,y/px.length];};
-  const c0=cen(comps[0]), maxD=110*(cam.pxmm||1); let all=[];
+  const comps=components(bin,g.pw,g.ph,8);
+  if(!comps.length||comps[0].length<g.minA/3){cam.base=F;return;}
+  // Teile eines Pfeils (z. B. heller Schaft auf hellem Feld) wieder zusammenfügen
+  const cen=px=>{let x=0,y=0;for(const i of px){x+=i%g.pw;y+=(i/g.pw)|0;}return [x/px.length,y/px.length];};
+  const c0=cen(comps[0]), maxD=120*g.pxmm; let all=[];
   for(const px of comps){const c=cen(px); if(Math.hypot(c[0]-c0[0],c[1]-c0[1])<=maxD) all=all.concat(px);}
-  if(all.length<cam.minA){cam.base=F;return;}
-  const [tx,ty]=tipOf(all,w), [bx,by]=applyH(cal.H,tx,ty), d=scoreAt(bx,by);
-  cam.base=F; cam.last={tx,ty,l:d.l,t:Date.now()};
+  if(all.length<g.minA){cam.base=F;return;}
+  let bx,by; const tg=tipGeo(all,g);
+  if(tg){ [bx,by]=refineTip(tg,g,diff); }
+  else { const [tx,ty]=tipThin(all,g.pw); [bx,by]=applyH(g.Hp,tx+0.5,ty+0.5); }
+  const d=scoreAt(bx,by);
+  cam.base=F; cam.last={bx,by,l:d.l,t:Date.now()};
   if(!st){ setCamStat('Änderung erkannt (nicht dein Zug)'); return; }
   if(st.ev.closed){ setCamStat('Pfeile ziehen…'); return; }
   const darts=[...G.visit,d], ev2=evalVisit(G,st.p.cid,darts);
